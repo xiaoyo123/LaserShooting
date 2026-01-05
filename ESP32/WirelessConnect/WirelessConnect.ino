@@ -60,15 +60,6 @@ void setup() {
     // 2. 啟動 TCP 伺服器
     server.begin();
 
-    // IPAddress local_IP(192, 168, 1, 200);      // ESP32 的固定 IP
-    // IPAddress gateway(192, 168, 1, 1);         // 你的路由器閘道
-    // IPAddress subnet(255, 255, 255, 0);        // 子網路遮罩
-    // IPAddress primaryDNS(8, 8, 8, 8);          // Google DNS（選用）
-    // IPAddress secondaryDNS(8, 8, 4, 4);        // Google DNS（選用）
-    
-    // if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-    //     Serial.println("靜態 IP 設定失敗");
-    // }
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
     // 啟動檔案系統
@@ -76,30 +67,6 @@ void setup() {
         Serial.println("LittleFS 初始化失敗");
         return;
     }
-    
-    // // 連接 WiFi
-    // Serial.println();
-    // Serial.print("連接到 WiFi: ");
-    // Serial.println(ssid);
-    
-    // WiFi.begin(ssid, password);
-    
-    // while (WiFi.status() != WL_CONNECTED) {
-    //     delay(500);
-    //     Serial.print(".");
-    // }
-    
-    // Serial.println();
-    // Serial.println("WiFi 已連接！");
-    // Serial.print("IP 地址: ");
-    // Serial.println(WiFi.localIP());
-    
-    // // 啟動 TCP 服務器
-    // server.begin();
-    // Serial.print("TCP 服務器已啟動，監聽端口: ");
-    // Serial.println(SERVER_PORT);
-    // Serial.println("等待 Python 連接...");
-    
     
     // 初始化音訊輸出
     out = new AudioOutputI2S();
