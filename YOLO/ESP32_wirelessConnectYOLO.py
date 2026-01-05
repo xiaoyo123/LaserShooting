@@ -20,11 +20,11 @@ USER_ID = "user_001"
 MAX_SHOTS = 5
 SAVE_DIR = "shots_json"
 SAVE_FRAMES_DIR = "shots_frames"  # 儲存處理幀的資料夾
-CONF_THRES = 0.8          # YOLO 偵測信心度閾值
+CONF_THRES = 0.75         # YOLO 偵測信心度閾值
 DEBOUNCE_SEC = 0.25          # 去抖動:至少隔這麼久才算下一發(避免同一發連續幀重複寫)
 
 # WiFi連接參數
-ESP32_IP = "192.168.1.200"    # ESP32 的 IP 地址（請修改為你的 ESP32 IP）
+ESP32_IP = "192.168.4.1"    # ESP32 的 IP 地址（請修改為你的 ESP32 IP）
 ESP32_PORT = 8080            # ESP32 監聽的端口號
 
 os.makedirs(SAVE_DIR, exist_ok=True)

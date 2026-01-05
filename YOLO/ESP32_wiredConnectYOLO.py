@@ -6,6 +6,7 @@ import queue
 from ultralytics import YOLO
 import numpy as np
 import serial
+import serial.tools.list_ports
 
 
 model = YOLO("best.pt")
@@ -41,13 +42,20 @@ def yolo_detect(frame):
     results = model.predict(source=frame, save=False, verbose=False)  # 不儲存，減少輸出
     return results
 def detect_point_in_roi(roi_image, offset_x, offset_y):
-    """在指定的 ROI 區域內偵測綠色光點，回傳絕對座標的bbox list: [(x,y,w,h), ...]"""
+
+    """在指定的 ROI 區域內偵測紅色光點，回傳絕對座標的bbox list: [(x,y,w,h), ...]"""
     point_boxes = []
     hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
 
-    lower_green = np.array([50, 40, 40])
-    upper_green = np.array([90, 255, 255])
-    mask = cv2.inRange(hsv, lower_green, upper_green)
+    # 紅色在HSV色相環的兩端，需要兩個範圍
+    lower_red1 = np.array([0, 0, 150])
+    upper_red1 = np.array([15, 255, 255])
+    lower_red2 = np.array([165, 0, 150])
+    upper_red2 = np.array([180, 255, 255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = cv2.bitwise_or(mask1, mask2)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -103,7 +111,7 @@ def select_best_hit_candidate(frame, yolo_results):
     all_targets.sort(key=lambda t: t["center_x"])
     # target_numbers = {t["center_x"]: idx + 1 for idx, t in enumerate(all_targets)}
     for idx, t in enumerate(all_targets):
-        t["No"] = idx + 1
+        t["No"] = idx
 
     # 現在檢查每個目標是否有綠點
     for target in all_targets:
@@ -205,8 +213,8 @@ def detect_from_frames(frames, shot_idx):
 
     for idx, (ts, frame) in enumerate(frames):
         # 儲存原始幀
-        frame_path = os.path.join(shot_dir, f"frame_{idx:02d}_{int(ts*1000)}.jpg")
-        cv2.imwrite(frame_path, frame)
+        #frame_path = os.path.join(shot_dir, f"frame_{idx:02d}_{int(ts*1000)}.jpg")
+        #cv2.imwrite(frame_path, frame)
         
         results = yolo_detect(frame)
         cand = select_best_hit_candidate(frame, results)
@@ -353,8 +361,16 @@ def trigger_loop_keyboard():
     global stop_flag
     # 設定 ESP32 的串口（請根據實際情況修改 COM port 和 baudrate）
     try:
-        ser = serial.Serial('COM5', 115200, timeout=1)  # 修改 COM3 為你的 ESP32 端口
+        ports = serial.tools.list_ports.comports()
+        for port in ports:
+            # Most ESP32 boards contain these strings in their description
+            if "CP210" in port.description or "CH340" in port.description or "USB Serial" in port.description:
+                print(port.device)
+            print(port.description)
+        ser = serial.Serial('COM8', 115200, timeout=1)  # 修改 COM3 為你的 ESP32 端口
         print(f"已連接到 ESP32: {ser.port}")
+
+
     except Exception as e:
         print(f"無法連接到 ESP32: {e}")
         return
