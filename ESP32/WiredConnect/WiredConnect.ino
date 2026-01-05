@@ -8,10 +8,10 @@
 #include "AudioOutputI2S.h"
 
 // --- 硬體接腳 (ESP32-S3) ---
-#define I2S_LRC       7
+#define I2S_LRC       4
 #define I2S_BCLK      5
 #define I2S_DIN       6
-#define BUTTON_PIN    4   // BOOT 按鈕
+#define BUTTON_PIN    42   
 
 // --- 音訊物件指標 ---
 AudioGeneratorMP3 *mp3 = NULL;

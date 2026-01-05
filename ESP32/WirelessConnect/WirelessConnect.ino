@@ -1,59 +1,128 @@
+#include <Arduino.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 
-// WiFi 設定
-const char* ssid = "LYL";          // 請修改為你的 WiFi SSID
-const char* password = "29744073";      // 請修改為你的 WiFi 密碼
+// --- 引用 ESP8266Audio 函式庫 ---
+// 即使名稱有 ESP8266，它也完美支援 ESP32
+#include "AudioFileSourceLittleFS.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
 
-// TCP 服務器設定
+// --- WiFi 設定 ---
+const char* ssid = "ESP32_S3";   // 熱點名稱
+const char* password = "cilab35324";    // 熱點密碼
+
+// --- TCP 服務器設定 ---
 const int SERVER_PORT = 8080;      // TCP 服務器端口
 WiFiServer server(SERVER_PORT);    // 建立 TCP 服務器
 WiFiClient client;                 // 用於與 Python 通訊的客戶端
 
-// 按鈕設定
-const int BTN_PIN = 4;          // 按鈕接的腳位
+// --- 硬體接腳 (ESP32-S3) ---
+#define I2S_LRC       4
+#define I2S_BCLK      5
+#define I2S_DIN       6
+#define BUTTON_PIN    42   // BOOT 按鈕
+
+// --- 音訊物件指標 ---
+AudioGeneratorMP3 *mp3 = NULL;
+AudioFileSourceLittleFS *file = NULL;
+AudioOutputI2S *out = NULL;
 bool lastState = HIGH;
-unsigned long lastFireMs = 0;
-const unsigned long debounceMs = 30;
+
+bool isPlaying = false;
+
+void stopPlaying() {
+  if (mp3) {
+    mp3->stop();
+    delete mp3;
+    mp3 = NULL;
+  }
+  if (file) {
+    file->close();
+    delete file;
+    file = NULL;
+  }
+  isPlaying = false;
+}
 
 void setup() {
-    IPAddress local_IP(192, 168, 1, 200);      // ESP32 的固定 IP
-    IPAddress gateway(192, 168, 1, 1);         // 你的路由器閘道
-    IPAddress subnet(255, 255, 255, 0);        // 子網路遮罩
-    IPAddress primaryDNS(8, 8, 8, 8);          // Google DNS（選用）
-    IPAddress secondaryDNS(8, 8, 4, 4);        // Google DNS（選用）
-    
-    if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-        Serial.println("靜態 IP 設定失敗");
-    }
     Serial.begin(115200);
-    pinMode(BTN_PIN, INPUT_PULLUP);
+
+    // 1. 啟動 AP 模式
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ssid, password);
     
-    // 連接 WiFi
-    Serial.println();
-    Serial.print("連接到 WiFi: ");
-    Serial.println(ssid);
+    Serial.println("\n=== ESP32 伺服器已啟動 ===");
+    Serial.print("請電腦連線至: "); Serial.println(ssid);
+    Serial.print("伺服器 IP: "); Serial.println(WiFi.softAPIP()); // 通常是 192.168.4.1
+    Serial.print("通訊埠 (Port): "); Serial.println(SERVER_PORT);
+
+    // 2. 啟動 TCP 伺服器
+    server.begin();
+
+    // IPAddress local_IP(192, 168, 1, 200);      // ESP32 的固定 IP
+    // IPAddress gateway(192, 168, 1, 1);         // 你的路由器閘道
+    // IPAddress subnet(255, 255, 255, 0);        // 子網路遮罩
+    // IPAddress primaryDNS(8, 8, 8, 8);          // Google DNS（選用）
+    // IPAddress secondaryDNS(8, 8, 4, 4);        // Google DNS（選用）
     
-    WiFi.begin(ssid, password);
+    // if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+    //     Serial.println("靜態 IP 設定失敗");
+    // }
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    // 啟動檔案系統
+    if (!LittleFS.begin()) {
+        Serial.println("LittleFS 初始化失敗");
+        return;
     }
     
-    Serial.println();
-    Serial.println("WiFi 已連接！");
-    Serial.print("IP 地址: ");
-    Serial.println(WiFi.localIP());
+    // // 連接 WiFi
+    // Serial.println();
+    // Serial.print("連接到 WiFi: ");
+    // Serial.println(ssid);
     
-    // 啟動 TCP 服務器
-    server.begin();
-    Serial.print("TCP 服務器已啟動，監聽端口: ");
-    Serial.println(SERVER_PORT);
-    Serial.println("等待 Python 連接...");
+    // WiFi.begin(ssid, password);
+    
+    // while (WiFi.status() != WL_CONNECTED) {
+    //     delay(500);
+    //     Serial.print(".");
+    // }
+    
+    // Serial.println();
+    // Serial.println("WiFi 已連接！");
+    // Serial.print("IP 地址: ");
+    // Serial.println(WiFi.localIP());
+    
+    // // 啟動 TCP 服務器
+    // server.begin();
+    // Serial.print("TCP 服務器已啟動，監聽端口: ");
+    // Serial.println(SERVER_PORT);
+    // Serial.println("等待 Python 連接...");
+    
+    
+    // 初始化音訊輸出
+    out = new AudioOutputI2S();
+    out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DIN);
+    out->SetGain(0.5); // 音量設定：0.0 ~ 4.0 (0.5 為 50% 音量)
 }
 
 void loop() {
-    // 檢查是否有新的客戶端連接
+
+
+    // --- 1. 處理音樂播放 ---
+    if (isPlaying && mp3) {
+        if (mp3->isRunning()) {
+            if (!mp3->loop()) { 
+                // 如果 loop 回傳 false，代表歌曲播完了
+                stopPlaying(); 
+            }
+        } else {
+            stopPlaying();
+        }
+    }
+    
+    // --- 2. 檢查是否有新的客戶端連接 ---
     if (!client || !client.connected()) {
         client = server.available();
         if (client) {
@@ -61,20 +130,37 @@ void loop() {
         }
     }
     
-    // 讀取按鈕狀態
-    bool cur = digitalRead(BTN_PIN);
-
+    // --- 3. 處理按鈕 ---
+    bool cur = digitalRead(BUTTON_PIN);
+    
     // 偵測「按下」(HIGH -> LOW)
-    if (lastState == HIGH && cur == LOW) {
-        unsigned long now = millis();
-        if (now - lastFireMs > debounceMs) {
-            Serial.println("🔥 按鈕被按下");
-            sendFireEvent();
-            lastFireMs = now;
+    if (cur == LOW && lastState == HIGH) {
+        Serial.println("FIRE");
+        sendFireEvent();
+        
+        // 如果正在播，就先停掉
+        if (isPlaying) {
+            stopPlaying();
+            delay(200); // 稍微停頓一下
+        }
+        
+        // 檢查檔案保險
+        if (LittleFS.exists("/shut.mp3")) {
+            file = new AudioFileSourceLittleFS("/shut.mp3");
+            mp3 = new AudioGeneratorMP3();
+            mp3->begin(file, out);
+            isPlaying = true;
+        }
+        
+        // 等待按鈕放開 (防止連發)
+        // 如果您想要按住連發，可以把下面這段 while 註解掉
+        while(digitalRead(BUTTON_PIN) == LOW) {
+            // 在等待放開的同時，也要繼續播放音樂，不然聲音會卡住！
+            if (isPlaying && mp3 && mp3->isRunning()) mp3->loop();
         }
     }
     lastState = cur;
-    delay(1);
+    delay(20);
 }
 
 void sendFireEvent() {
@@ -82,6 +168,6 @@ void sendFireEvent() {
         client.println("FIRE");  // 發送訊息給 Python（帶換行符）
         Serial.println("📡 已發送 FIRE 訊息給 Python");
     } else {
-        Serial.println("WiFi 未連接！");
+        Serial.println("⚠️ Python 未連接！");
     }
 }
