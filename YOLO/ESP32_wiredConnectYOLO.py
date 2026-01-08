@@ -1,12 +1,13 @@
-# 找到bounding box中心點跟雷射光點的位置，以每個中心點為中心算出雷射光位置，並存成json檔
+# 加上tcp server版本
 import cv2, time, os, json
 from collections import deque
 import threading
 import queue
+
+import serial
 from ultralytics import YOLO
 import numpy as np
-import serial
-import serial.tools.list_ports
+import socket
 
 
 model = YOLO("best.pt")
@@ -20,15 +21,16 @@ POST_WAIT_SEC = 0.12       # 等待後續幀進buffer的時間（依FPS調）
 USER_ID = "user_001"
 MAX_SHOTS = 5
 SAVE_DIR = "shots_json"
-SAVE_FRAMES_DIR = "shots_frames"  # 儲存處理幀的資料夾
-CONF_THRES = 0.8          # YOLO 偵測信心度閾值
-DEBOUNCE_SEC = 0.25          # 去抖動:至少隔這麼久才算下一發(避免同一發連續幀重複寫)
+CONF_THRES = 0.6          # YOLO 偵測信心度閾值
+DEBOUNCE_SEC = 0.25          # 去抖動：至少隔這麼久才算下一發（避免同一發連續幀重複寫）
+TCP_HOST = "127.0.0.1"    # TCP Server IP
+TCP_PORT = 5000           # TCP Server Port
 os.makedirs(SAVE_DIR, exist_ok=True)
-os.makedirs(SAVE_FRAMES_DIR, exist_ok=True)
 
 # ====== 共享資料 ======
 frame_buffer = deque(maxlen=BUFFER_SIZE)  # 每筆: (ts, frame)
 fire_events = queue.Queue()               # 存 "fire timestamp"
+tcp_clients = []                          # 存放連線的 Unity 客戶端
 stop_flag = False
 
 def atomic_write_json(path, data):
@@ -37,22 +39,76 @@ def atomic_write_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def send_to_unity(data):
+    """發送 JSON 資料給所有連線的 Unity 客戶端"""
+    json_str = json.dumps(data, ensure_ascii=False) + "\n"  # 加換行符作為分隔
+    json_bytes = json_str.encode('utf-8')
+    
+    disconnected = []
+    for client in tcp_clients:
+        try:
+            client.sendall(json_bytes)
+        except:
+            disconnected.append(client)
+    
+    # 移除斷線的客戶端
+    for client in disconnected:
+        tcp_clients.remove(client)
+        try:
+            client.close()
+        except:
+            pass
+
+# ====== TCP Server 執行緒 ======
+def tcp_server_loop():
+    global stop_flag
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((TCP_HOST, TCP_PORT))
+    server.listen(5)
+    server.settimeout(1.0)  # 設置 timeout 以便能檢查 stop_flag
+    
+    print(f"🌐 TCP Server 啟動於 {TCP_HOST}:{TCP_PORT}")
+    
+    while not stop_flag:
+        try:
+            client, addr = server.accept()
+            tcp_clients.append(client)
+            print(f"✅ Unity 客戶端連線: {addr}")
+        except socket.timeout:
+            continue
+        except:
+            break
+    
+    # 關閉所有連線
+    for client in tcp_clients:
+        try:
+            client.close()
+        except:
+            pass
+    server.close()
+    print("🌐 TCP Server 已關閉")
+
 # ====== 你的偵測：請接你現有的 yolo_detect + select_best_hit_candidate ======
 def yolo_detect(frame):
     results = model.predict(source=frame, save=False, verbose=False)  # 不儲存，減少輸出
     return results
 def detect_point_in_roi(roi_image, offset_x, offset_y):
-
     """在指定的 ROI 區域內偵測紅色光點，回傳絕對座標的bbox list: [(x,y,w,h), ...]"""
     point_boxes = []
     hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
 
     # 紅色在HSV色相環的兩端，需要兩個範圍
-    lower_red1 = np.array([0, 0, 150])
-    upper_red1 = np.array([15, 255, 255])
-    lower_red2 = np.array([165, 0, 150])
-    upper_red2 = np.array([180, 255, 255])
+    # lower_red1 = np.array([0, 100, 100])
+    # upper_red1 = np.array([10, 255, 255])
+    # lower_red2 = np.array([170, 100, 100])
+    # upper_red2 = np.array([180, 255, 255])
 
+    lower_red1 = np.array([0, 0, 200])
+    upper_red1 = np.array([15, 255, 255])
+    lower_red2 = np.array([165, 0, 200])
+    upper_red2 = np.array([180, 255, 255])
+    
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
@@ -197,44 +253,25 @@ def select_best_hit_candidate(frame, yolo_results):
     best = max(candidates, key=lambda c: c["green_area"])
     return best
 
-def detect_from_frames(frames, shot_idx):
+def detect_from_frames(frames):
     """
     frames: list of (ts, frame)
     回傳 best_payload（命中）或 miss_payload（沒命中）
-    同時將所有處理的幀存成圖片
     """
     best = None
     best_ts = None
-    best_frame_idx = None
 
-    # 建立此次shot的資料夾
-    shot_dir = os.path.join(SAVE_FRAMES_DIR, f"shot{shot_idx:02d}")
-    os.makedirs(shot_dir, exist_ok=True)
-
-    for idx, (ts, frame) in enumerate(frames):
-        # 儲存原始幀
-        #frame_path = os.path.join(shot_dir, f"frame_{idx:02d}_{int(ts*1000)}.jpg")
-        #cv2.imwrite(frame_path, frame)
-        
+    for ts, frame in frames:
         results = yolo_detect(frame)
         cand = select_best_hit_candidate(frame, results)
         if cand is None:
             continue
 
-        # 例：用 green_area 當排序依據（你也可以加上綠點面積、距離等）
+        # 例：用 green area 當排序依據
         score = cand["green_area"]
         if (best is None) or (score > best["green_area"]):
             best = cand
             best_ts = ts
-            best_frame_idx = idx
-
-    # 如果有最佳幀，額外標記它
-    if best_frame_idx is not None:
-        best_marker_path = os.path.join(shot_dir, f"BEST_frame_{best_frame_idx:02d}.txt")
-        with open(best_marker_path, "w") as f:
-            f.write(f"Best frame index: {best_frame_idx}\n")
-            f.write(f"Timestamp: {best_ts}\n")
-            f.write(f"Green area: {best['green_area']}\n")
 
     return best, best_ts
 
@@ -271,47 +308,6 @@ def display_loop():
                 label = f"Target {conf:.2f}"
                 cv2.putText(display_frame, label, (x1, y1-10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                
-                # 繪製5層同心長方形 (計分區域)
-                target_cx = (x1 + x2) / 2.0
-                target_cy = (y1 + y2) / 2.0
-                target_width = x2 - x1
-                target_height = y2 - y1
-                
-                # 5層橢圓: 0.1, 0.2, 0.3, 0.4, 0.5
-                # 顏色: 紅->橙->黃->淺藍->深藍
-                zone_colors = [
-                    (0, 0, 255),      # 10分: 紅色
-                    (0, 165, 255),    # 9分: 橙色
-                    (0, 255, 255),    # 8分: 黃色
-                    (255, 255, 0),    # 7分: 青色
-                    (255, 0, 0)       # 6分: 藍色
-                ]
-                zone_ratios = [0.1, 0.2, 0.3, 0.4, 0.5]
-                
-                for i, ratio in enumerate(zone_ratios):
-                    # 計算此層橢圓的半軸長度
-                    axes_w = int(target_width * ratio)
-                    axes_h = int(target_height * ratio)
-                    
-                    # 繪製橢圓
-                    cv2.ellipse(display_frame, 
-                               (int(target_cx), int(target_cy)),  # 中心點
-                               (axes_w, axes_h),                   # 半軸長度 (寬, 高)
-                               0,                                   # 旋轉角度
-                               0, 360,                             # 起始和結束角度
-                               zone_colors[i], 1)                  # 顏色和線寬
-                
-                # 繪製中心十字
-                cross_size = 5
-                cv2.line(display_frame, 
-                        (int(target_cx - cross_size), int(target_cy)),
-                        (int(target_cx + cross_size), int(target_cy)),
-                        (0, 0, 255), 2)
-                cv2.line(display_frame, 
-                        (int(target_cx), int(target_cy - cross_size)),
-                        (int(target_cx), int(target_cy + cross_size)),
-                        (0, 0, 255), 2)
                 
                 # 在ROI內偵測綠點
                 h_img, w_img = display_frame.shape[:2]
@@ -356,17 +352,11 @@ def camera_loop(cam_id=0):
 
     cap.release()
 
-# ====== 硬體觸發執行緒：透過 pyserial 讀取 ESP32 按鈕訊息 ======
+# ====== 硬體觸發執行緒：示範用鍵盤Enter當作Fire ======
 def trigger_loop_keyboard():
     global stop_flag
     # 設定 ESP32 的串口（請根據實際情況修改 COM port 和 baudrate）
     try:
-        ports = serial.tools.list_ports.comports()
-        for port in ports:
-            # Most ESP32 boards contain these strings in their description
-            if "CP210" in port.description or "CH340" in port.description or "USB Serial" in port.description:
-                print(port.device)
-            print(port.description)
         ser = serial.Serial('COM8', 115200, timeout=1)  # 修改 COM3 為你的 ESP32 端口
         print(f"已連接到 ESP32: {ser.port}")
 
@@ -374,7 +364,7 @@ def trigger_loop_keyboard():
     except Exception as e:
         print(f"無法連接到 ESP32: {e}")
         return
-    
+
     while not stop_flag:
         try:
             if ser.in_waiting > 0:
@@ -385,7 +375,7 @@ def trigger_loop_keyboard():
         except Exception as e:
             print(f"讀取 ESP32 資料錯誤: {e}")
             break
-    
+
     ser.close()
     print("已關閉 ESP32 連接")
 
@@ -416,7 +406,7 @@ def fire_handler_loop():
         end = min(len(buf), idx + 1 + POST_FRAMES)
         window = buf[start:end]
 
-        best, best_ts = detect_from_frames(window, shot_idx + 1)
+        best, best_ts = detect_from_frames(window)
 
         shot_idx += 1
         ts_now = time.time()
@@ -435,6 +425,7 @@ def fire_handler_loop():
                     "y": float(best["dy"]),
                     "score": int(best["score"])  # 環狀計分: 10, 9, 8, 7, 6
                 }
+                # "score":int(best["score"])
 
             }
         else:
@@ -450,17 +441,23 @@ def fire_handler_loop():
         fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
         out_path = os.path.join(SAVE_DIR, fname)
         atomic_write_json(out_path, payload)
+        
+        # 發送給 Unity
+        send_to_unity(payload)
+        
         print(f"✅ 寫入 {out_path}  hit={payload['hit']}")
 
     print("🔚 五發結束 / handler停止")
 
 # ====== 主程式 ======
 if __name__ == "__main__":
+    t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_cam = threading.Thread(target=camera_loop, daemon=True)
     t_dsp = threading.Thread(target=display_loop, daemon=True)  # 顯示執行緒
     t_trg = threading.Thread(target=trigger_loop_keyboard, daemon=True)  # 之後換成硬體訊號
     t_hnd = threading.Thread(target=fire_handler_loop, daemon=True)
 
+    t_tcp.start()
     t_cam.start()
     t_dsp.start()
     t_trg.start()
