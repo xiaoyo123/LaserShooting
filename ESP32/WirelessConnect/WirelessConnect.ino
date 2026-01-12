@@ -21,7 +21,7 @@ WiFiClient client;                 // 用於與 Python 通訊的客戶端
 #define I2S_LRC       4
 #define I2S_BCLK      5
 #define I2S_DIN       6
-#define BUTTON_PIN    42   // BOOT 按鈕
+#define BUTTON_PIN    7   // BOOT 按鈕
 
 // --- 音訊物件指標 ---
 AudioGeneratorMP3 *mp3 = NULL;
@@ -69,9 +69,10 @@ void setup() {
     }
     
     // 初始化音訊輸出
-    out = new AudioOutputI2S();
+    out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
     out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DIN);
-    out->SetGain(0.5); // 音量設定：0.0 ~ 4.0 (0.5 為 50% 音量)
+    out->SetGain(3.95); // 音量設定：0.0 ~ 4.0 (0.5 為 50% 音量)
+    out->SetOutputModeMono(true);
 }
 
 void loop() {
@@ -127,7 +128,8 @@ void loop() {
         }
     }
     lastState = cur;
-    delay(20);
+    if(!isPlaying)
+        delay(20);
 }
 
 void sendFireEvent() {
