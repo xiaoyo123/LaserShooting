@@ -144,9 +144,9 @@ def detect_point_in_roi(roi_image, offset_x, offset_y):
     point_boxes = []
     hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
 
-    lower_red1 = np.array([0, 100, 100])
+    lower_red1 = np.array([0, 25, 100])
     upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
+    lower_red2 = np.array([170, 25, 100])
     upper_red2 = np.array([180, 255, 255])
     
     # lower_red1 = np.array([0, 0, 200])
@@ -212,7 +212,7 @@ def select_best_hit_candidate(frame, yolo_results):
     all_targets.sort(key=lambda t: t["center_x"])
     # target_numbers = {t["center_x"]: idx + 1 for idx, t in enumerate(all_targets)}
     for idx, t in enumerate(all_targets):
-        t["No"] = idx + 1
+        t["No"] = idx
 
     # 現在檢查每個目標是否有綠點
     for target in all_targets:
@@ -453,8 +453,8 @@ def camera_loop(cam_id=1):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     # 強制設定顯示視窗大小為 1280x720
-    cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
+    # cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
+    # cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
         
     while not stop_flag:
         ret, frame = cap.read()
