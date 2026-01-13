@@ -148,6 +148,11 @@ def detect_point_in_roi(roi_image, offset_x, offset_y):
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170, 100, 100])
     upper_red2 = np.array([180, 255, 255])
+    
+    # lower_red1 = np.array([0, 0, 200])
+    # upper_red1 = np.array([15, 255, 255])
+    # lower_red2 = np.array([165, 0, 200])
+    # upper_red2 = np.array([180, 255, 255])
 
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
@@ -435,14 +440,22 @@ def display_loop():
     cv2.destroyAllWindows()
 
 # ====== 相機擷取執行緒：只負責buffer ======
-def camera_loop(cam_id=0):
+def camera_loop(cam_id=1):
     global stop_flag
-    cap = cv2.VideoCapture(cam_id)
+    cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("❌ 無法開啟攝影機")
         stop_flag = True
         return
+    
+    # 設定相機解析度（可選）
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+    # 強制設定顯示視窗大小為 1280x720
+    cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
+        
     while not stop_flag:
         ret, frame = cap.read()
         if not ret:
