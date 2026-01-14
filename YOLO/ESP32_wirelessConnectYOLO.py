@@ -588,16 +588,6 @@ def fire_handler_loop():
         # 執行五發射擊
         while not stop_flag and shot_idx < MAX_SHOTS:
             fire_ts = fire_events.get()  # block 等待
-    global stop_flag
-    
-    while not stop_flag:
-        shot_idx = 0
-        print("\n🎯 === 新回合開始 ===")
-        print(f"等待射擊訊號... (剩餘 {MAX_SHOTS} 發)")
-        
-        # 執行五發射擊
-        while not stop_flag and shot_idx < MAX_SHOTS:
-            fire_ts = fire_events.get()  # block 等待
 
             # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
             time.sleep(POST_WAIT_SEC)
@@ -695,25 +685,6 @@ def fire_handler_loop():
             
             print(f"✅ 第 {shot_idx}/{MAX_SHOTS} 發 - 寫入 {out_path}  hit={payload['hit']}")
 
-        # 五發射完，停止接受新的射擊訊號
-        print("\n🔚 五發射擊完成！")
-        round_active.clear()  # 停止接受射擊訊號
-        print("⏳ 等待 Unity 發送 RESET 訊號...")
-        
-        # 等待 Unity 的 reset 訊號
-        unity_reset_events.get()  # block 等待
-        
-        # 收到 reset，清空射擊事件隊列並重新開始
-        print("✅ 收到 Unity RESET 訊號，準備下一輪...")
-        
-        # 清空可能殘留的射擊事件
-        while not fire_events.empty():
-            fire_events.get()
-        
-        round_active.set()  # 重新允許射擊
-        time.sleep(0.5)  # 短暫延遲避免誤觸
-    
-    print("🛑 fire_handler_loop 結束")
         # 五發射完，停止接受新的射擊訊號
         print("\n🔚 五發射擊完成！")
         round_active.clear()  # 停止接受射擊訊號
