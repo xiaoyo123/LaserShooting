@@ -708,13 +708,11 @@ def fire_handler_loop():
 # ====== 主程式 ======
 if __name__ == "__main__":
     t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
-    t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_cam = threading.Thread(target=camera_loop, daemon=True)
     t_dsp = threading.Thread(target=display_loop, daemon=True)  # 顯示執行緒
     t_trg = threading.Thread(target=trigger_loop_wifi, daemon=True)  # WiFi連接ESP32
     t_hnd = threading.Thread(target=fire_handler_loop, daemon=True)
 
-    t_tcp.start()
     t_tcp.start()
     t_cam.start()
     t_dsp.start()
