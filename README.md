@@ -17,3 +17,7 @@
 ### 無線:
 
 燒錄好無線版本後，電腦連接上ESP32_S3的wifi網路(密碼: 大密碼)，確認 ```.pt``` 模型文件路徑無誤後即可執行
+
+
+## YOLO Package Link
+https://drive.google.com/file/d/18i-Xx96OhUK7-rB30_YRHIlrTzHsdz9k/view?usp=sharing
