@@ -166,9 +166,18 @@ def detect_point_in_roi(roi_image, offset_x, offset_y):
     point_boxes = []
     hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
 
-    # 使用全域配置的 HSV 參數
-    mask1 = cv2.inRange(hsv, LOWER_RED1, UPPER_RED1)
-    mask2 = cv2.inRange(hsv, LOWER_RED2, UPPER_RED2)
+    lower_red1 = np.array([0, 25, 100])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 25, 100])
+    upper_red2 = np.array([180, 255, 255])
+    
+    # lower_red1 = np.array([0, 0, 200])
+    # upper_red1 = np.array([15, 255, 255])
+    # lower_red2 = np.array([165, 0, 200])
+    # upper_red2 = np.array([180, 255, 255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -471,6 +480,15 @@ def camera_loop(cam_id=None):
     # cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
     # cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
         
+    
+    # 設定相機解析度（可選）
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # 強制設定顯示視窗大小為 1280x720
+    # cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
+    # cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
+        
     while not stop_flag:
         ret, frame = cap.read()
         if not ret:
@@ -534,6 +552,18 @@ def trigger_loop_wifi():
                             print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
                     else:
                         print("⚠️  當前回合已結束，等待 Unity reset 中...")
+                    # 只有在 round_active 時才接受射擊訊號
+                    if round_active.is_set():
+                        # 去抖動：避免在短時間內重複觸發
+                        current_time = time.time()
+                        if current_time - last_fire_time >= DEBOUNCE_SEC:
+                            fire_events.put(current_time)
+                            last_fire_time = current_time
+                            print(f"🔥 觸發射擊事件")
+                        else:
+                            print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
+                    else:
+                        print("⚠️  當前回合已結束，等待 Unity reset 中...")
                         
         except socket.timeout:
             # 超時是正常的，繼續接收
@@ -558,13 +588,37 @@ def fire_handler_loop():
         # 執行五發射擊
         while not stop_flag and shot_idx < MAX_SHOTS:
             fire_ts = fire_events.get()  # block 等待
+    global stop_flag
+    
+    while not stop_flag:
+        shot_idx = 0
+        print("\n🎯 === 新回合開始 ===")
+        print(f"等待射擊訊號... (剩餘 {MAX_SHOTS} 發)")
+        
+        # 執行五發射擊
+        while not stop_flag and shot_idx < MAX_SHOTS:
+            fire_ts = fire_events.get()  # block 等待
 
+            # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
+            time.sleep(POST_WAIT_SEC)
             # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
             time.sleep(POST_WAIT_SEC)
 
             # 把 buffer 複製出來避免被同時修改
             buf = list(frame_buffer)
+            # 把 buffer 複製出來避免被同時修改
+            buf = list(frame_buffer)
 
+            # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
+            # 取 fire_ts 前後幀
+            # 作法：找最後一個 ts <= fire_ts 的 index
+            idx = None
+            for i in range(len(buf)-1, -1, -1):
+                if buf[i][0] <= fire_ts:
+                    idx = i
+                    break
+            if idx is None:
+                idx = 0
             # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
             # 取 fire_ts 前後幀
             # 作法：找最後一個 ts <= fire_ts 的 index
@@ -579,9 +633,15 @@ def fire_handler_loop():
             start = max(0, idx - PRE_FRAMES)
             end = min(len(buf), idx + 1 + POST_FRAMES)
             window = buf[start:end]
+            start = max(0, idx - PRE_FRAMES)
+            end = min(len(buf), idx + 1 + POST_FRAMES)
+            window = buf[start:end]
 
             best, best_ts = detect_from_frames(window, shot_idx + 1)
+            best, best_ts = detect_from_frames(window, shot_idx + 1)
 
+            shot_idx += 1
+            ts_now = time.time()
             shot_idx += 1
             ts_now = time.time()
 
@@ -601,7 +661,31 @@ def fire_handler_loop():
                     "shot_idx": shot_idx,
                     "hit": False,
                 }
+            if best is not None:
+                payload = {
+                    "shot_idx": shot_idx,
+                    "hit": True,
+                    "target": {
+                        "No": int(best["No"]),
+                        "x": float(best["dx"]),
+                        "y": float(best["dy"]),
+                        "score": int(best["score"])  # 環狀計分: 10, 9, 8, 7, 6
+                    }
+                }
+            else:
+                payload = {
+                    "shot_idx": shot_idx,
+                    "hit": False,
+                }
 
+            fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
+            out_path = os.path.join(SAVE_DIR, fname)
+            atomic_write_json(out_path, payload)
+            
+            # 發送給 Unity
+            send_to_unity(payload)
+            
+            print(f"✅ 第 {shot_idx}/{MAX_SHOTS} 發 - 寫入 {out_path}  hit={payload['hit']}")
             fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
             out_path = os.path.join(SAVE_DIR, fname)
             atomic_write_json(out_path, payload)
@@ -630,15 +714,36 @@ def fire_handler_loop():
         time.sleep(0.5)  # 短暫延遲避免誤觸
     
     print("🛑 fire_handler_loop 結束")
+        # 五發射完，停止接受新的射擊訊號
+        print("\n🔚 五發射擊完成！")
+        round_active.clear()  # 停止接受射擊訊號
+        print("⏳ 等待 Unity 發送 RESET 訊號...")
+        
+        # 等待 Unity 的 reset 訊號
+        unity_reset_events.get()  # block 等待
+        
+        # 收到 reset，清空射擊事件隊列並重新開始
+        print("✅ 收到 Unity RESET 訊號，準備下一輪...")
+        
+        # 清空可能殘留的射擊事件
+        while not fire_events.empty():
+            fire_events.get()
+        
+        round_active.set()  # 重新允許射擊
+        time.sleep(0.5)  # 短暫延遲避免誤觸
+    
+    print("🛑 fire_handler_loop 結束")
 
 # ====== 主程式 ======
 if __name__ == "__main__":
+    t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_cam = threading.Thread(target=camera_loop, daemon=True)
     t_dsp = threading.Thread(target=display_loop, daemon=True)  # 顯示執行緒
     t_trg = threading.Thread(target=trigger_loop_wifi, daemon=True)  # WiFi連接ESP32
     t_hnd = threading.Thread(target=fire_handler_loop, daemon=True)
 
+    t_tcp.start()
     t_tcp.start()
     t_cam.start()
     t_dsp.start()
