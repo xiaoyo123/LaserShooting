@@ -6,9 +6,20 @@ import queue
 from ultralytics import YOLO
 import numpy as np
 import socket
+import yaml
 
 
 model = YOLO("best.pt")
+
+# ====== 讀取 YAML 配置 ======
+CONFIG_FILE = "config.yaml"
+try:
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    print(f"✅ 成功載入配置檔: {CONFIG_FILE}")
+except FileNotFoundError:
+    print(f"⚠️  找不到配置檔 {CONFIG_FILE},使用預設值")
+    config = {}
 
 # ====== 參數 ======
 BUFFER_SIZE = 20           # 保留最近20幀
@@ -20,12 +31,27 @@ USER_ID = "user_001"
 MAX_SHOTS = 5
 SAVE_DIR = "shots_json"
 SAVE_FRAMES_DIR = "shots_frames"  # 儲存處理幀的資料夾
-CONF_THRES = 0.75         # YOLO 偵測信心度閾值
+CONF_THRES = 0.6        # YOLO 偵測信心度閾值
 DEBOUNCE_SEC = 0.25          # 去抖動:至少隔這麼久才算下一發(避免同一發連續幀重複寫)
+
+# 從 YAML 配置檔讀取相機和顏色參數
+CAM_ID = config.get('camera', {}).get('cam_id', 1)
+LOWER_RED1 = np.array(config.get('hsv_color', {}).get('lower_red1', [0, 25, 100]))
+UPPER_RED1 = np.array(config.get('hsv_color', {}).get('upper_red1', [10, 255, 255]))
+LOWER_RED2 = np.array(config.get('hsv_color', {}).get('lower_red2', [170, 25, 100]))
+UPPER_RED2 = np.array(config.get('hsv_color', {}).get('upper_red2', [180, 255, 255]))
+
+# print(f"📷 相機 ID: {CAM_ID}")
+# print(f"🎨 HSV 範圍 1: {LOWER_RED1} ~ {UPPER_RED1}")
+# print(f"🎨 HSV 範圍 2: {LOWER_RED2} ~ {UPPER_RED2}")
 
 # WiFi連接參數
 ESP32_IP = "192.168.4.1"    # ESP32 的 IP 地址（請修改為你的 ESP32 IP）
 ESP32_PORT = 8080            # ESP32 監聽的端口號
+
+# Unity TCP Server 參數
+TCP_HOST = "127.0.0.1"    # TCP Server IP
+TCP_PORT = 5000           # TCP Server Port
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 os.makedirs(SAVE_FRAMES_DIR, exist_ok=True)
@@ -33,13 +59,103 @@ os.makedirs(SAVE_FRAMES_DIR, exist_ok=True)
 # ====== 共享資料 ======
 frame_buffer = deque(maxlen=BUFFER_SIZE)  # 每筆: (ts, frame)
 fire_events = queue.Queue()               # 存 "fire timestamp"
+unity_reset_events = queue.Queue()        # 存 Unity 的 reset 訊號
+tcp_clients = []                          # 存放連線的 Unity 客戶端
 stop_flag = False
+round_active = threading.Event()          # 控制是否允許觸發射擊
+round_active.set()                        # 初始允許射擊
 
 def atomic_write_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+def send_to_unity(data):
+    """發送 JSON 資料給所有連線的 Unity 客戶端"""
+    json_str = json.dumps(data, ensure_ascii=False) + "\n"  # 加換行符作為分隔
+    json_bytes = json_str.encode('utf-8')
+    
+    disconnected = []
+    for client in tcp_clients:
+        try:
+            client.sendall(json_bytes)
+        except:
+            disconnected.append(client)
+    
+    # 移除斷線的客戶端
+    for client in disconnected:
+        tcp_clients.remove(client)
+        try:
+            client.close()
+        except:
+            pass
+
+# ====== TCP Server 執行緒 ======
+def tcp_server_loop():
+    global stop_flag
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((TCP_HOST, TCP_PORT))
+    server.listen(5)
+    server.settimeout(1.0)  # 設置 timeout 以便能檢查 stop_flag
+    
+    print(f"🌐 TCP Server 啟動於 {TCP_HOST}:{TCP_PORT}")
+    
+    while not stop_flag:
+        try:
+            client, addr = server.accept()
+            tcp_clients.append(client)
+            print(f"✅ Unity 客戶端連線: {addr}")
+            
+            # 為每個客戶端啟動接收執行緒
+            client_thread = threading.Thread(target=handle_unity_client, args=(client, addr), daemon=True)
+            client_thread.start()
+            
+        except socket.timeout:
+            continue
+        except:
+            break
+    
+    # 關閉所有連線
+    for client in tcp_clients:
+        try:
+            client.close()
+        except:
+            pass
+    server.close()
+    print("🌐 TCP Server 已關閉")
+
+def handle_unity_client(client, addr):
+    """處理來自 Unity 客戶端的訊息"""
+    global stop_flag
+    print(f"📡 開始監聽來自 {addr} 的訊息")
+    
+    try:
+        while not stop_flag:
+            # 接收 Unity 傳來的資料
+            data = client.recv(1024)
+            if not data:
+                break
+                
+            message = data.decode('utf-8').strip()
+            print(f"📨 收到 Unity 訊息: {message}")
+            
+            # 檢查是否為 RESET 訊號
+            if "RESET" in message.upper() or "reset" in message.lower():
+                print("✅ 收到 Unity RESET 訊號")
+                unity_reset_events.put(True)
+                
+    except Exception as e:
+        print(f"⚠️  Unity 客戶端 {addr} 連線錯誤: {e}")
+    finally:
+        if client in tcp_clients:
+            tcp_clients.remove(client)
+        try:
+            client.close()
+        except:
+            pass
+        print(f"❌ Unity 客戶端 {addr} 已斷線")
 
 # ====== 你的偵測：請接你現有的 yolo_detect + select_best_hit_candidate ======
 def yolo_detect(frame):
@@ -50,13 +166,9 @@ def detect_point_in_roi(roi_image, offset_x, offset_y):
     point_boxes = []
     hsv = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
 
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
-    upper_red2 = np.array([180, 255, 255])
-
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    # 使用全域配置的 HSV 參數
+    mask1 = cv2.inRange(hsv, LOWER_RED1, UPPER_RED1)
+    mask2 = cv2.inRange(hsv, LOWER_RED2, UPPER_RED2)
     mask = cv2.bitwise_or(mask1, mask2)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -113,7 +225,7 @@ def select_best_hit_candidate(frame, yolo_results):
     all_targets.sort(key=lambda t: t["center_x"])
     # target_numbers = {t["center_x"]: idx + 1 for idx, t in enumerate(all_targets)}
     for idx, t in enumerate(all_targets):
-        t["No"] = idx + 1
+        t["No"] = idx
 
     # 現在檢查每個目標是否有綠點
     for target in all_targets:
@@ -341,14 +453,24 @@ def display_loop():
     cv2.destroyAllWindows()
 
 # ====== 相機擷取執行緒：只負責buffer ======
-def camera_loop(cam_id=0):
+def camera_loop(cam_id=None):
     global stop_flag
-    cap = cv2.VideoCapture(cam_id)
+    if cam_id is None:
+        cam_id = CAM_ID  # 使用全域配置的相機 ID
+    cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("❌ 無法開啟攝影機")
         stop_flag = True
         return
+    
+    # 設定相機解析度（可選）
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+    # 強制設定顯示視窗大小為 1280x720
+    # cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
+    # cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
+        
     while not stop_flag:
         ret, frame = cap.read()
         if not ret:
@@ -400,14 +522,18 @@ def trigger_loop_wifi():
                 if line:  # 如果接收到訊息（例如 ESP32 發送 "FIRE"）
                     print(f"📡 收到 ESP32 訊息: {line}")
                     
-                    # 去抖動：避免在短時間內重複觸發
-                    current_time = time.time()
-                    if current_time - last_fire_time >= DEBOUNCE_SEC:
-                        fire_events.put(current_time)
-                        last_fire_time = current_time
-                        print(f"🔥 觸發射擊事件")
+                    # 只有在 round_active 時才接受射擊訊號
+                    if round_active.is_set():
+                        # 去抖動：避免在短時間內重複觸發
+                        current_time = time.time()
+                        if current_time - last_fire_time >= DEBOUNCE_SEC:
+                            fire_events.put(current_time)
+                            last_fire_time = current_time
+                            print(f"🔥 觸發射擊事件")
+                        else:
+                            print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
                     else:
-                        print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
+                        print("⚠️  當前回合已結束，等待 Unity reset 中...")
                         
         except socket.timeout:
             # 超時是正常的，繼續接收
@@ -422,76 +548,98 @@ def trigger_loop_wifi():
 
 # ====== 事件處理：一收到fire就抓幀並偵測，輸出JSON ======
 def fire_handler_loop():
-    shot_idx = 0
-    while not stop_flag and shot_idx < MAX_SHOTS:
-        fire_ts = fire_events.get()  # block 等待
+    global stop_flag
+    
+    while not stop_flag:
+        shot_idx = 0
+        print("\n🎯 === 新回合開始 ===")
+        print(f"等待射擊訊號... (剩餘 {MAX_SHOTS} 發)")
+        
+        # 執行五發射擊
+        while not stop_flag and shot_idx < MAX_SHOTS:
+            fire_ts = fire_events.get()  # block 等待
 
-        # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
-        time.sleep(POST_WAIT_SEC)
+            # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
+            time.sleep(POST_WAIT_SEC)
 
-        # 把 buffer 複製出來避免被同時修改
-        buf = list(frame_buffer)
+            # 把 buffer 複製出來避免被同時修改
+            buf = list(frame_buffer)
 
-        # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
-        # 取 fire_ts 前後幀
-        # 作法：找最後一個 ts <= fire_ts 的 index
-        idx = None
-        for i in range(len(buf)-1, -1, -1):
-            if buf[i][0] <= fire_ts:
-                idx = i
-                break
-        if idx is None:
-            idx = 0
+            # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
+            # 取 fire_ts 前後幀
+            # 作法：找最後一個 ts <= fire_ts 的 index
+            idx = None
+            for i in range(len(buf)-1, -1, -1):
+                if buf[i][0] <= fire_ts:
+                    idx = i
+                    break
+            if idx is None:
+                idx = 0
 
-        start = max(0, idx - PRE_FRAMES)
-        end = min(len(buf), idx + 1 + POST_FRAMES)
-        window = buf[start:end]
+            start = max(0, idx - PRE_FRAMES)
+            end = min(len(buf), idx + 1 + POST_FRAMES)
+            window = buf[start:end]
 
-        best, best_ts = detect_from_frames(window, shot_idx + 1)
+            best, best_ts = detect_from_frames(window, shot_idx + 1)
 
-        shot_idx += 1
-        ts_now = time.time()
+            shot_idx += 1
+            ts_now = time.time()
 
-        if best is not None:
-            payload = {
-                "shot_idx": shot_idx,
-                # "remain": MAX_SHOTS - shot_idx,
-                # "timestamp": ts_now,
-                # "fire_ts": fire_ts,
-                # "used_frame_ts": best_ts,
-                "hit": True,
-                "target": {
-                    "No": int(best["No"]),
-                    "x": float(best["dx"]),
-                    "y": float(best["dy"]),
-                    "score": int(best["score"])  # 環狀計分: 10, 9, 8, 7, 6
+            if best is not None:
+                payload = {
+                    "shot_idx": shot_idx,
+                    "hit": True,
+                    "target": {
+                        "No": int(best["No"]),
+                        "x": float(best["dx"]),
+                        "y": float(best["dy"]),
+                        "score": int(best["score"])  # 環狀計分: 10, 9, 8, 7, 6
+                    }
+                }
+            else:
+                payload = {
+                    "shot_idx": shot_idx,
+                    "hit": False,
                 }
 
-            }
-        else:
-            payload = {
-                "shot_idx": shot_idx,
-                # "remain": MAX_SHOTS - shot_idx,
-                # "timestamp": ts_now,
-                # "fire_ts": fire_ts,
-                "hit": False,
-                # "reason": "no_green_point_in_any_target_box"
-            }
+            fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
+            out_path = os.path.join(SAVE_DIR, fname)
+            atomic_write_json(out_path, payload)
+            
+            # 發送給 Unity
+            send_to_unity(payload)
+            
+            print(f"✅ 第 {shot_idx}/{MAX_SHOTS} 發 - 寫入 {out_path}  hit={payload['hit']}")
 
-        fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
-        out_path = os.path.join(SAVE_DIR, fname)
-        atomic_write_json(out_path, payload)
-        print(f"✅ 寫入 {out_path}  hit={payload['hit']}")
-
-    print("🔚 五發結束 / handler停止")
+        # 五發射完，停止接受新的射擊訊號
+        print("\n🔚 五發射擊完成！")
+        round_active.clear()  # 停止接受射擊訊號
+        print("⏳ 等待 Unity 發送 RESET 訊號...")
+        
+        # 等待 Unity 的 reset 訊號
+        unity_reset_events.get()  # block 等待
+        
+        # 收到 reset，清空射擊事件隊列並重新開始
+        print("✅ 收到 Unity RESET 訊號，準備下一輪...")
+        
+        # 清空可能殘留的射擊事件
+        while not fire_events.empty():
+            fire_events.get()
+        
+        round_active.set()  # 重新允許射擊
+        time.sleep(0.5)  # 短暫延遲避免誤觸
+    
+    print("🛑 fire_handler_loop 結束")
 
 # ====== 主程式 ======
 if __name__ == "__main__":
+    t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_cam = threading.Thread(target=camera_loop, daemon=True)
     t_dsp = threading.Thread(target=display_loop, daemon=True)  # 顯示執行緒
     t_trg = threading.Thread(target=trigger_loop_wifi, daemon=True)  # WiFi連接ESP32
     t_hnd = threading.Thread(target=fire_handler_loop, daemon=True)
 
+    t_tcp.start()
     t_cam.start()
     t_dsp.start()
     t_trg.start()
