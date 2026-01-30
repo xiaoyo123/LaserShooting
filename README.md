@@ -24,3 +24,6 @@ https://drive.google.com/file/d/18i-Xx96OhUK7-rB30_YRHIlrTzHsdz9k/view?usp=shari
 
 ## Unity Package Link
 https://drive.google.com/file/d/1F_lKNulnvgApcZwZmCHVYnmHiyA-DkZb/view?usp=sharing
+
+## YOLO exe Link
+https://drive.google.com/file/d/1b3U4IoRdxrav3c7AjnM3IIfz_FPayuFj/view?usp=sharing
