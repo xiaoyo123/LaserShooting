@@ -498,28 +498,46 @@ def camera_loop(cam_id=None):
 
     cap.release()
 
-# ====== 硬體觸發執行緒：透過 WiFi Socket 讀取 ESP32 按鈕訊息 ======
-def trigger_loop_wifi():
-    global stop_flag
-    sock = None
-    last_fire_time = 0  # 用於去抖動
+# ====== ESP32 連接檢查函數 ======
+def connect_to_esp32():
+    """持續嘗試連接到 ESP32，直到連接成功為止"""
+    retry_count = 0
+    retry_interval = 3  # 每次重試間隔3秒
     
-    try:
-        # 建立 TCP Socket 連接到 ESP32
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)  # 設定連接超時
-        print(f"正在連接到 ESP32 ({ESP32_IP}:{ESP32_PORT})...")
-        sock.connect((ESP32_IP, ESP32_PORT))
-        sock.settimeout(1)  # 連接後設定較短的接收超時
-        print(f"✅ 已透過 WiFi 連接到 ESP32: {ESP32_IP}:{ESP32_PORT}")
-    except Exception as e:
-        print(f"❌ 無法連接到 ESP32: {e}")
-        print(f"   請確認:")
-        print(f"   1. ESP32 已開機並連接到 WiFi")
-        print(f"   2. IP 地址 {ESP32_IP} 正確")
-        print(f"   3. ESP32 上的 TCP Server 正在運行於端口 {ESP32_PORT}")
-        stop_flag = True
-        return
+    print(f"\n🔌 開始連接到 ESP32 ({ESP32_IP}:{ESP32_PORT})...")
+    print(f"   (如果連接失敗將每 {retry_interval} 秒重試一次)\n")
+    
+    while True:
+        try:
+            retry_count += 1
+            if retry_count > 1:
+                print(f"🔄 第 {retry_count} 次嘗試連接 ESP32...")
+            else:
+                print(f"🔄 正在嘗試連接 ESP32...")
+                
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)  # 設定連接超時
+            sock.connect((ESP32_IP, ESP32_PORT))
+            sock.settimeout(1)  # 連接後設定較短的接收超時
+            
+            print(f"✅ 已成功連接到 ESP32: {ESP32_IP}:{ESP32_PORT}")
+            return sock
+            
+        except Exception as e:
+            if retry_count == 1:
+                # 第一次失敗時顯示詳細資訊
+                print(f"❌ 連接失敗: {e}")
+                print(f"\n 將在 {retry_interval} 秒後重試...\n")
+            else:
+                # 後續失敗只顯示簡短訊息
+                print(f"   連接失敗，{retry_interval} 秒後重試...")
+            
+            time.sleep(retry_interval)
+
+# ====== 硬體觸發執行緒：透過 WiFi Socket 讀取 ESP32 按鈕訊息 ======
+def trigger_loop_wifi(sock):
+    global stop_flag
+    last_fire_time = 0  # 用於去抖動
     
     buffer = ""
     while not stop_flag:
@@ -705,25 +723,50 @@ def fire_handler_loop():
     
     print("🛑 fire_handler_loop 結束")
 
+
 # ====== 主程式 ======
 if __name__ == "__main__":
+    print("=" * 60)
+    print("LaserShooting 系統啟動")
+    print("=" * 60)
+    
+    # 步驟 1: 持續嘗試連接 ESP32 直到成功
+    esp32_sock = connect_to_esp32()
+    
+    # 步驟 2: ESP32 連接成功，啟動其他執行緒
+    print("🔧 正在啟動系統各模組...")
+    
     t_tcp = threading.Thread(target=tcp_server_loop, daemon=True)  # TCP Server
     t_cam = threading.Thread(target=camera_loop, daemon=True)
     t_dsp = threading.Thread(target=display_loop, daemon=True)  # 顯示執行緒
-    t_trg = threading.Thread(target=trigger_loop_wifi, daemon=True)  # WiFi連接ESP32
+    t_trg = threading.Thread(target=trigger_loop_wifi, args=(esp32_sock,), daemon=True)  # WiFi連接ESP32
     t_hnd = threading.Thread(target=fire_handler_loop, daemon=True)
 
     t_tcp.start()
+    print("  ✅ TCP Server 執行緒已啟動")
     t_cam.start()
+    print("  ✅ 攝影機執行緒已啟動")
     t_dsp.start()
+    print("  ✅ 顯示執行緒已啟動")
     t_trg.start()
+    print("  ✅ ESP32 觸發監聽執行緒已啟動")
     t_hnd.start()
+    print("  ✅ 射擊處理執行緒已啟動")
+    
+    print("\n" + "=" * 60)
+    print("✅ 所有模組啟動完成，系統運行中...")
+    print("=" * 60 + "\n")
 
     try:
         while t_hnd.is_alive():
             time.sleep(0.2)
     except KeyboardInterrupt:
-        pass
+        print("\n⚠️  收到中斷訊號...")
 
     stop_flag = True
-    print("程式結束")
+    if esp32_sock:
+        esp32_sock.close()
+    print("\n" + "=" * 60)
+    print("🛑 程式結束")
+    print("=" * 60)
+
