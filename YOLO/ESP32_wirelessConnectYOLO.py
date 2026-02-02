@@ -431,10 +431,6 @@ def display_loop():
                         (int(target_cx - cross_size), int(target_cy)),
                         (int(target_cx + cross_size), int(target_cy)),
                         (0, 0, 255), 2)
-                cv2.line(display_frame, 
-                        (int(target_cx), int(target_cy - cross_size)),
-                        (int(target_cx), int(target_cy + cross_size)),
-                        (0, 0, 255), 2)
                 
                 # 在ROI內偵測綠點
                 h_img, w_img = display_frame.shape[:2]
@@ -471,15 +467,6 @@ def camera_loop(cam_id=None):
         print("❌ 無法開啟攝影機")
         stop_flag = True
         return
-    
-    # 設定相機解析度（可選）
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    # 強制設定顯示視窗大小為 1280x720
-    # cv2.namedWindow("Real-time Laser Detection", cv2.WINDOW_NORMAL)
-    # cv2.resizeWindow("Real-time Laser Detection", 1280, 720)
-        
     
     # 設定相機解析度（可選）
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -570,18 +557,6 @@ def trigger_loop_wifi(sock):
                             print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
                     else:
                         print("⚠️  當前回合已結束，等待 Unity reset 中...")
-                    # 只有在 round_active 時才接受射擊訊號
-                    if round_active.is_set():
-                        # 去抖動：避免在短時間內重複觸發
-                        current_time = time.time()
-                        if current_time - last_fire_time >= DEBOUNCE_SEC:
-                            fire_events.put(current_time)
-                            last_fire_time = current_time
-                            print(f"🔥 觸發射擊事件")
-                        else:
-                            print(f"⏭️ 去抖動: 忽略過快的觸發 ({current_time - last_fire_time:.3f}s)")
-                    else:
-                        print("⚠️  當前回合已結束，等待 Unity reset 中...")
                         
         except socket.timeout:
             # 超時是正常的，繼續接收
@@ -609,24 +584,10 @@ def fire_handler_loop():
 
             # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
             time.sleep(POST_WAIT_SEC)
-            # 等待一點時間，讓 POST_FRAMES 幀進buffer（跟FPS有關）
-            time.sleep(POST_WAIT_SEC)
 
             # 把 buffer 複製出來避免被同時修改
             buf = list(frame_buffer)
-            # 把 buffer 複製出來避免被同時修改
-            buf = list(frame_buffer)
 
-            # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
-            # 取 fire_ts 前後幀
-            # 作法：找最後一個 ts <= fire_ts 的 index
-            idx = None
-            for i in range(len(buf)-1, -1, -1):
-                if buf[i][0] <= fire_ts:
-                    idx = i
-                    break
-            if idx is None:
-                idx = 0
             # 找到 fire_ts 在 buffer 中的位置（以 timestamp 切）
             # 取 fire_ts 前後幀
             # 作法：找最後一個 ts <= fire_ts 的 index
@@ -641,15 +602,9 @@ def fire_handler_loop():
             start = max(0, idx - PRE_FRAMES)
             end = min(len(buf), idx + 1 + POST_FRAMES)
             window = buf[start:end]
-            start = max(0, idx - PRE_FRAMES)
-            end = min(len(buf), idx + 1 + POST_FRAMES)
-            window = buf[start:end]
 
             best, best_ts = detect_from_frames(window, shot_idx + 1)
-            best, best_ts = detect_from_frames(window, shot_idx + 1)
 
-            shot_idx += 1
-            ts_now = time.time()
             shot_idx += 1
             ts_now = time.time()
 
@@ -669,31 +624,7 @@ def fire_handler_loop():
                     "shot_idx": shot_idx,
                     "hit": False,
                 }
-            if best is not None:
-                payload = {
-                    "shot_idx": shot_idx,
-                    "hit": True,
-                    "target": {
-                        "No": int(best["No"]),
-                        "x": float(best["dx"]),
-                        "y": float(best["dy"]),
-                        "score": int(best["score"])  # 環狀計分: 10, 9, 8, 7, 6
-                    }
-                }
-            else:
-                payload = {
-                    "shot_idx": shot_idx,
-                    "hit": False,
-                }
 
-            fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
-            out_path = os.path.join(SAVE_DIR, fname)
-            atomic_write_json(out_path, payload)
-            
-            # 發送給 Unity
-            send_to_unity(payload)
-            
-            print(f"✅ 第 {shot_idx}/{MAX_SHOTS} 發 - 寫入 {out_path}  hit={payload['hit']}")
             fname = f"{USER_ID}_shot{shot_idx:02d}_{int(ts_now*1000)}.json"
             out_path = os.path.join(SAVE_DIR, fname)
             atomic_write_json(out_path, payload)
